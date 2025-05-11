@@ -13,11 +13,6 @@ contract JC4PNFT is ERC721 {
     string public constant NFT_DESCRIPTION = "A unique 1-of-1 trading card that provides the owner 4 hours of contracting time from the creator.";
     string public constant NFT_IMAGE_URL = "https://images.kasra.codes/nft-card/nft.jpg";
 
-    // Auction-related data to be included in metadata later
-    // address internal auctionWinner;
-    // uint256 internal winningBidAmount;
-    // uint64 internal winnerFid;
-
     // --- Auction Configuration State Variables (from SPEC_SHEET.md) ---
     address public immutable auctionOwner; // Set to msg.sender on deployment, manages auction parameters
     address public immutable beneficiary;  // Address that receives the auction proceeds
@@ -127,15 +122,6 @@ contract JC4PNFT is ERC721 {
 
         return string(abi.encodePacked("data:application/json;base64,", json));
     }
-
-    // --- Functions to be added/modified for auction logic ---
-    // constructor with auction params
-    // placeBid
-    // endAuction
-    // withdraw
-    // _calculateMinBid
-    // _extendAuctionIfNeeded
-    // And state variables from the spec sheet for auction
 
     // --- Helper to check ERC721 compliance for ownerOf ---
     // This ensures our ownerOfToken is consistent if used externally,
@@ -279,6 +265,4 @@ contract JC4PNFT is ERC721 {
 
         emit FundsWithdrawn(beneficiary, balance);
     }
-
-    // function getMostActiveBidder() public view returns (address); // Decided to ignore
 } 
