@@ -9,8 +9,8 @@ contract JC4PNFT is ERC721 {
     uint256 public constant TOKEN_ID = 1;
     address public ownerOfToken; // As per spec for the single token owner
 
-    string public constant NFT_NAME_METADATA = "JC4P Collectible";
-    string public constant NFT_DESCRIPTION = "A unique 1-of-1 digital collectible for the JC4P auction.";
+    string public constant NFT_NAME_METADATA = "JC4P Trading Card";
+    string public constant NFT_DESCRIPTION = "A unique 1-of-1 trading card that provides the owner 4 hours of contracting time from the creator.";
     string public constant NFT_IMAGE_URL = "https://images.kasra.codes/nft-card/nft.jpg";
 
     // Auction-related data to be included in metadata later
