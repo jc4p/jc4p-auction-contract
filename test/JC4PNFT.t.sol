@@ -20,8 +20,8 @@ contract JC4PNFTTest is Test {
     event FundsWithdrawn(address indexed beneficiary, uint256 amount); // Added event
 
     // Test constants for NFT metadata
-    string internal constant EXPECTED_NFT_NAME_METADATA = "JC4P Collectible";
-    string internal constant EXPECTED_NFT_DESCRIPTION = "A unique 1-of-1 digital collectible for the JC4P auction.";
+    string internal constant EXPECTED_NFT_NAME_METADATA = "JC4P Trading Card";
+    string internal constant EXPECTED_NFT_DESCRIPTION = "A unique 1-of-1 trading card that provides the owner 4 hours of contracting time from the creator.";
     string internal constant EXPECTED_NFT_IMAGE_URL = "https://images.kasra.codes/nft-card/nft.jpg";
 
     // Test constants for auction setup
