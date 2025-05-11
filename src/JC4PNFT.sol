@@ -2,7 +2,8 @@
 pragma solidity ^0.8.20;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import {Base64} from "@openzeppelin/contracts/utils/Base64.sol"; // For on-chain JSON
+import {Base64} from "solady/utils/Base64.sol"; // For on-chain JSON, switched to Solady
+import {LibString} from "solady/utils/LibString.sol"; // For uint to string conversion
 
 contract JC4PNFT is ERC721 {
     uint256 public constant TOKEN_ID = 1;
@@ -18,7 +19,8 @@ contract JC4PNFT is ERC721 {
     // uint64 internal winnerFid;
 
     // --- Auction Configuration State Variables (from SPEC_SHEET.md) ---
-    address public immutable auctionOwner; // Set to msg.sender on deployment
+    address public immutable auctionOwner; // Set to msg.sender on deployment, manages auction parameters
+    address public immutable beneficiary;  // Address that receives the auction proceeds
     uint256 public startTime;
     uint256 public endTime;
     uint256 public reservePrice;
@@ -46,6 +48,7 @@ contract JC4PNFT is ERC721 {
     event BidPlaced(address indexed bidder, uint256 amount, uint64 fid);
     event AuctionExtended(uint256 newEndTime);
     event AuctionEnded(address indexed winner, uint256 amount); // Added indexed for winner
+    event FundsWithdrawn(address indexed beneficiary, uint256 amount); // Event for withdrawal
 
     // Auction-related data to be included in metadata (actual values set on auction end)
     address internal actualAuctionWinner_ForMetadata;
@@ -55,6 +58,7 @@ contract JC4PNFT is ERC721 {
     constructor(
         string memory _name,                // Contract name for ERC721, e.g., "JC4P Auction NFT"
         string memory _symbol,              // Contract symbol for ERC721, e.g., "JC4P"
+        address _beneficiary,           // Auction specific: who gets the funds
         uint256 _reservePrice,          // Auction specific
         uint256 _auctionDurationSeconds,  // Auction specific
         uint256 _minIncrementBps,       // Auction specific
@@ -62,7 +66,9 @@ contract JC4PNFT is ERC721 {
         uint256 _softCloseWindow,       // Auction specific
         uint256 _softCloseExtension     // Auction specific
     ) ERC721(_name, _symbol) {
+        require(_beneficiary != address(0), "Beneficiary cannot be zero address");
         auctionOwner = msg.sender;
+        beneficiary = _beneficiary;
         startTime = block.timestamp;
         endTime = block.timestamp + _auctionDurationSeconds;
         reservePrice = _reservePrice;
@@ -91,24 +97,20 @@ contract JC4PNFT is ERC721 {
 
         string memory auctionDataJson = ""; 
 
-        // Example of how auction data could be integrated (needs Strings.toString or similar for uints)
         if (actualAuctionWinner_ForMetadata != address(0)) {
-            // This part needs a robust uint to string conversion for production
-            // For now, we'll construct a simplified version or leave it to be improved with a library.
-            // string memory winnerFidStr = Strings.toString(winnerFid_ForMetadata);
-            // string memory winningBidStr = Strings.toString(winningBidAmount_ForMetadata);
+            string memory winnerFidStr = LibString.toString(winnerFid_ForMetadata);
+            string memory winningBidStr = LibString.toString(winningBidAmount_ForMetadata);
+            
             auctionDataJson = string(abi.encodePacked(
-                ',\"attributes\": [{\"trait_type\":\"Winner FID\",\"value\":\"', 
-                // winnerFidStr, // Placeholder
-                "FID_PLACEHOLDER",
-                '\"},{\"trait_type\":\"Winning Bid (wei)\",\"value\":\"',
-                // winningBidStr, // Placeholder
-                "AMOUNT_PLACEHOLDER",
-                '\"}]'
+                ',"attributes":[{"trait_type":"Winner FID","value":"', 
+                winnerFidStr,
+                '"},{"trait_type":"Winning Bid (wei)","value":"',
+                winningBidStr,
+                '"}]'
             ));
         }
 
-        string memory json = Base64.encode(
+        string memory json = Base64.encode( // Using Solady's Base64 encode
             bytes(
                 string(
                     abi.encodePacked(
@@ -214,17 +216,18 @@ contract JC4PNFT is ERC721 {
         require(!auctionEnded, "AuctionEnded: Auction already ended");
         require(block.timestamp >= endTime, "AuctionNotOver: Auction has not reached its end time yet");
 
-        auctionEnded = true;
+        auctionEnded = true; // Mark auction as ended. If subsequent operations fail (like payout), this will be reverted.
 
         if (hasFirstBid) { // This implies reserve was met by the first bid, and highestBid >= reservePrice
             // Mint NFT to the highest bidder
             _mintNFT(highestBidder);
 
-            // Transfer funds to auction owner
+            // Transfer funds to beneficiary
             if (highestBid > 0) { // Ensure there are funds to send
-                (bool success, ) = auctionOwner.call{value: highestBid}("");
-                require(success, "PayoutFailed: Failed to transfer funds to auction owner");
+                (bool success, ) = beneficiary.call{value: highestBid}("");
+                require(success, "PayoutFailed: Failed to transfer funds to beneficiary");
             }
+            // If highestBid was 0 (e.g. reserve 0) or payout successful, emit AuctionEnded
             emit AuctionEnded(highestBidder, highestBid);
         } else {
             // No valid bids met reserve, or no bids at all
@@ -232,8 +235,50 @@ contract JC4PNFT is ERC721 {
         }
     }
 
-    // --- Optional Utility Functions (to be implemented based on SPEC_SHEET.md) ---
-    // function getMostActiveBidder() public view returns (address);
-    // function getBidderStats(address addr) public view returns (uint256 count, uint64 fid);
-    // function getAuctionInfo() public view returns (address highest, uint256 amount, uint256 timeLeft);
+    // --- Optional Utility Functions (from SPEC_SHEET.md) ---
+
+    /**
+     * @notice Gets the number of bids and FID for a given address.
+     * @param addr The address of the bidder.
+     * @return count The number of bids placed by the address.
+     * @return fid The Farcaster ID associated with the address's latest bid.
+     */
+    function getBidderStats(address addr) public view returns (uint256 count, uint64 fid) {
+        count = bidCount[addr];
+        fid = bidderFID[addr];
+    }
+
+    /**
+     * @notice Gets key information about the current state of the auction.
+     * @return highestBidder_ The address of the current highest bidder.
+     * @return highestBid_ The current highest bid amount.
+     * @return timeLeft_ The number of seconds remaining in the auction, or 0 if ended/not started.
+     */
+    function getAuctionInfo() public view returns (address highestBidder_, uint256 highestBid_, uint256 timeLeft_) {
+        highestBidder_ = highestBidder;
+        highestBid_ = highestBid;
+        
+        if (auctionEnded || block.timestamp < startTime) {
+            timeLeft_ = 0;
+        } else if (block.timestamp >= endTime) {
+            timeLeft_ = 0; // Auction should have been ended, or is over.
+        } else {
+            timeLeft_ = endTime - block.timestamp;
+        }
+    }
+
+    function withdraw() external {
+        require(msg.sender == beneficiary, "Withdraw: Caller is not beneficiary");
+        require(auctionEnded, "Withdraw: Auction not ended");
+        
+        uint256 balance = address(this).balance;
+        require(balance > 0, "Withdraw: No balance");
+
+        (bool success, ) = beneficiary.call{value: balance}("");
+        require(success, "Withdraw: Transfer failed");
+
+        emit FundsWithdrawn(beneficiary, balance);
+    }
+
+    // function getMostActiveBidder() public view returns (address); // Decided to ignore
 } 

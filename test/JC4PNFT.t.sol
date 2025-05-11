@@ -5,15 +5,19 @@ import {Test, console} from "forge-std/Test.sol";
 import {JC4PNFT} from "../src/JC4PNFT.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import { IERC721Errors } from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
-import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
+import {Base64} from "solady/utils/Base64.sol";
+import {LibString} from "solady/utils/LibString.sol";
+import {RejectingBeneficiary} from "./RejectingBeneficiary.sol"; // Import the helper contract
 
 contract JC4PNFTTest is Test {
     JC4PNFT nft;
+    RejectingBeneficiary internal rejectingBeneficiaryInstance; // Instance for specific tests
 
     // Declare events to be checked by vm.expectEmit
     event BidPlaced(address indexed bidder, uint256 amount, uint64 fid);
     event AuctionExtended(uint256 newEndTime);
     event AuctionEnded(address indexed winner, uint256 amount);
+    event FundsWithdrawn(address indexed beneficiary, uint256 amount); // Added event
 
     // Test constants for NFT metadata
     string internal constant EXPECTED_NFT_NAME_METADATA = "JC4P Collectible";
@@ -32,6 +36,7 @@ contract JC4PNFTTest is Test {
     address user1 = vm.addr(1); 
     address user2 = vm.addr(2);
     address user3 = vm.addr(3); // New user for more complex scenarios
+    address constant BENEFICIARY_ADDRESS = address(0xBEEFCAFE); // New constant for beneficiary
 
     uint64 internal constant USER1_FID = 111;
     uint64 internal constant USER2_FID = 222;
@@ -42,12 +47,16 @@ contract JC4PNFTTest is Test {
     // Helper to receive ETH for refunds
     receive() external payable {}
 
-    function setUp() public {
+    function setUp() public { // General setUp
         deployer = address(this);
+        vm.warp(1 days); // Ensure a realistic starting timestamp
         setUpBlockTimestamp = block.timestamp; // Record timestamp before contract deployment for accurate checking
+        
+        // Default NFT instance with regular beneficiary for most tests
         nft = new JC4PNFT(
             "JC4P NFT Auction", 
             "JC4PA",            
+            BENEFICIARY_ADDRESS, // Pass beneficiary to constructor
             TEST_RESERVE_PRICE,
             TEST_AUCTION_DURATION_SECONDS,
             TEST_MIN_INCREMENT_BPS,
@@ -55,10 +64,40 @@ contract JC4PNFTTest is Test {
             TEST_SOFT_CLOSE_WINDOW,
             TEST_SOFT_CLOSE_EXTENSION
         );
+
+        // Deploy RejectingBeneficiary for specific tests if needed later
+        // We will deploy a fresh JC4PNFT instance for those tests to avoid interference
+
         // Give users some ETH for bidding
         vm.deal(user1, 2 ether);
         vm.deal(user2, 2 ether);
         vm.deal(user3, 2 ether);
+        vm.deal(BENEFICIARY_ADDRESS, 1 wei); // Give beneficiary a tiny bit so balance isn't 0 for checks
+    }
+
+    // Separate setUp for tests requiring the RejectingBeneficiary
+    function setUpWithRejectingBeneficiary() internal {
+        deployer = address(this);
+        vm.warp(1 days);
+        setUpBlockTimestamp = block.timestamp;
+
+        rejectingBeneficiaryInstance = new RejectingBeneficiary();
+        vm.deal(address(rejectingBeneficiaryInstance), 1 wei); // Give it some wei for gas checks
+
+        nft = new JC4PNFT(
+            "JC4P NFT Auction RB", // Different name to avoid state clashes if not careful
+            "JC4PARB",
+            address(rejectingBeneficiaryInstance),
+            TEST_RESERVE_PRICE,
+            TEST_AUCTION_DURATION_SECONDS,
+            TEST_MIN_INCREMENT_BPS,
+            TEST_SOFT_CLOSE_ENABLED,
+            TEST_SOFT_CLOSE_WINDOW,
+            TEST_SOFT_CLOSE_EXTENSION
+        );
+        // Fund bidders for these specific tests too
+        vm.deal(user1, 2 ether);
+        vm.deal(user2, 2 ether); 
     }
 
     function test_ERC721_InitialState() public { 
@@ -73,6 +112,7 @@ contract JC4PNFTTest is Test {
 
     function test_Auction_InitialConfiguration() public view {
         assertEq(nft.auctionOwner(), deployer, "Auction owner incorrect");
+        assertEq(nft.beneficiary(), BENEFICIARY_ADDRESS, "Beneficiary address incorrect in contract state"); // Check beneficiary
         assertApproxEqAbs(nft.startTime(), setUpBlockTimestamp, 2, "Start time incorrect");
         uint256 expectedEndTime = nft.startTime() + TEST_AUCTION_DURATION_SECONDS;
         assertEq(nft.endTime(), expectedEndTime, "End time incorrect");
@@ -306,9 +346,10 @@ contract JC4PNFTTest is Test {
 
     // --- Original Tests (TokenURI, SupportsInterface) ---
     function test_TokenURI_UnmintedToken() public view {
-        string memory expectedURI = _expectedUnmintedTokenURI();
+        string memory expectedJson = _expectedUnmintedJson();
         string memory actualURI = nft.tokenURI(1);
-        assertEq(actualURI, expectedURI, "tokenURI incorrect for unminted token");
+        string memory actualJson = _jsonFromUri(actualURI);
+        assertEq(actualJson, expectedJson, "tokenURI incorrect for unminted token");
     }
 
     function test_TokenURI_InvalidTokenId_TooHigh() public { 
@@ -349,17 +390,19 @@ contract JC4PNFTTest is Test {
 
     function test_EndAuction_Successful_WithWinner() public {
         vm.warp(nft.startTime() + 1 hours);
-        // User1 places a winning bid
         uint256 winningBid = TEST_RESERVE_PRICE + 0.1 ether;
         vm.prank(user1);
         nft.placeBid{value: winningBid}(USER1_FID);
 
-        vm.warp(nft.endTime() + 1 seconds); // Go past end time
+        vm.warp(nft.endTime() + 1 seconds); 
 
-        uint256 auctionOwnerInitialBalance = deployer.balance;
+        uint256 beneficiaryInitialBalance = BENEFICIARY_ADDRESS.balance;
+        uint256 deployerInitialBalance = deployer.balance;
 
-        vm.expectEmit(true, true, false, true); // checkSig, winner (topic1), skip topic2, amount (data1)
+        vm.expectEmit(true, true, false, true); 
         emit AuctionEnded(user1, winningBid);
+        
+        vm.prank(deployer); // Ensure deployer (auctionOwner) calls endAuction
         nft.endAuction();
 
         assertTrue(nft.auctionEnded(), "Auction should be marked as ended");
@@ -367,70 +410,68 @@ contract JC4PNFTTest is Test {
         assertEq(nft.getNFTOwner(), user1, "NFT should be minted to winner (getNFTOwner)");
         assertEq(nft.balanceOf(user1), 1, "Winner should have NFT balance of 1");
         
-        assertEq(deployer.balance, auctionOwnerInitialBalance + winningBid, "Auction owner did not receive funds");
+        assertEq(BENEFICIARY_ADDRESS.balance, beneficiaryInitialBalance + winningBid, "Beneficiary did not receive funds");
         assertEq(address(nft).balance, 0, "Contract should have no ETH balance after payout");
 
-        // Check tokenURI for winner attributes (even with placeholders)
         string memory actualURIWithWinner = nft.tokenURI(1);
-        string memory expectedURIWithWinner = _expectedWinnerTokenURI(); 
-        
+        string memory expectedJsonWithWinner = _expectedWinnerJson(USER1_FID, winningBid);
+        string memory actualJsonWithWinner = _jsonFromUri(actualURIWithWinner);
+
         console.log("----- BEGIN test_EndAuction_Successful_WithWinner DEBUG -----");
-        console.log("Actual URI (from contract):");
-        console.log(actualURIWithWinner);
-        console.log("Expected URI (from test helper _expectedWinnerTokenURI):");
-        console.log(expectedURIWithWinner);
-
-        string memory actualJsonDebug = _jsonFromUri(actualURIWithWinner); 
-        string memory expectedJsonDebug = _jsonFromUri(expectedURIWithWinner);
-
         console.log("Actual JSON Decoded (from contract):");
-        console.log(actualJsonDebug);
+        console.log(actualJsonWithWinner);
         console.log("Expected JSON Decoded (from test helper _expectedWinnerJson):");
-        console.log(expectedJsonDebug);
+        console.log(expectedJsonWithWinner);
         console.log("----- END test_EndAuction_Successful_WithWinner DEBUG -----");
-
-        assertEq(keccak256(bytes(actualURIWithWinner)), keccak256(bytes(expectedURIWithWinner)), "KECKED tokenURI incorrect after winner is set");
+        
+        assertEq(actualJsonWithWinner, expectedJsonWithWinner, "Decoded JSON incorrect after winner is set");
     }
 
     function test_EndAuction_Successful_NoBids() public {
-        vm.warp(nft.endTime() + 1 seconds); // Go past end time
-        uint256 auctionOwnerInitialBalance = deployer.balance;
+        vm.warp(nft.endTime() + 1 seconds); 
+        uint256 beneficiaryInitialBalance = BENEFICIARY_ADDRESS.balance;
+        uint256 deployerInitialBalance = deployer.balance;
+
+        console.log("--- NoBids: Deployer Bal Before Prank: ", deployerInitialBalance);
 
         vm.expectEmit(true, true, false, true);
         emit AuctionEnded(address(0), 0);
+        
+        vm.prank(deployer); 
+        console.log("--- NoBids: Deployer Bal After Prank, Before Call: ", deployer.balance);
         nft.endAuction();
+        uint256 deployerFinalBalance = deployer.balance;
+        console.log("--- NoBids: Deployer Bal After Call: ", deployerFinalBalance);
 
         assertTrue(nft.auctionEnded(), "Auction should be marked as ended (no bids)");
         assertEq(nft.ownerOfToken(), address(0), "NFT should not be minted (ownerOfToken)");
         assertEq(nft.getNFTOwner(), address(0), "NFT should not be minted (getNFTOwner)");
-        assertEq(deployer.balance, auctionOwnerInitialBalance, "Auction owner balance should not change");
+        assertEq(BENEFICIARY_ADDRESS.balance, beneficiaryInitialBalance, "Beneficiary balance should not change");
+        
+        console.log("--- NoBids: Deployer Balance Change (Initial - Final): ", deployerInitialBalance - deployerFinalBalance);
         assertEq(address(nft).balance, 0, "Contract balance should be 0 (no bids)");
 
-        // Check tokenURI does not contain winner attributes (i.e., it matches the unminted URI)
         string memory actualURI_NoBids = nft.tokenURI(1);
-        string memory expectedURI_NoBids = _expectedUnmintedTokenURI();
-        assertEq(actualURI_NoBids, expectedURI_NoBids, "tokenURI should be same as unminted if no winner");
+        string memory expectedJson_NoBids = _expectedUnmintedJson();
+        string memory actualJson_NoBids = _jsonFromUri(actualURI_NoBids);
+        assertEq(actualJson_NoBids, expectedJson_NoBids, "tokenURI should be same as unminted if no winner");
     }
 
     function test_EndAuction_Successful_BidsBelowReserve() public {
         vm.warp(nft.startTime() + 1 hours);
-        // User1 places a bid below reserve (this scenario isn't directly possible with current placeBid, 
-        // as placeBid requires meeting reserve for the first bid. 
-        // This test effectively becomes same as NoBids if placeBid enforces reserve.
-        // To properly test this, placeBid would need to allow bids below reserve that don't become highestBid, 
-        // or we assume reserve is 0 for this specific setup - let's keep placeBid as is and test no *valid* bids.
-        // This test will behave like test_EndAuction_Successful_NoBids because no bid met reserve.
-
-        vm.warp(nft.endTime() + 1 seconds); // Go past end time
-        uint256 auctionOwnerInitialBalance = deployer.balance;
+        vm.warp(nft.endTime() + 1 seconds); 
+        uint256 beneficiaryInitialBalance = BENEFICIARY_ADDRESS.balance;
+        uint256 deployerInitialBalance = deployer.balance; 
 
         vm.expectEmit(true, true, false, true);
         emit AuctionEnded(address(0), 0);
+        
+        vm.prank(deployer); // Ensure deployer (auctionOwner) calls endAuction
         nft.endAuction();
 
         assertTrue(nft.auctionEnded(), "Auction should be marked as ended (bids below reserve)");
         assertEq(nft.ownerOfToken(), address(0), "NFT should not be minted (bids below reserve)");
-        assertEq(deployer.balance, auctionOwnerInitialBalance, "Auction owner balance should not change (bids below reserve)");
+        assertEq(BENEFICIARY_ADDRESS.balance, beneficiaryInitialBalance, "Beneficiary balance should not change (bids below reserve)");
     }
 
     function test_PlaceBid_Fails_AfterAuctionEnded() public {
@@ -469,43 +510,217 @@ contract JC4PNFTTest is Test {
         return string(abi.encodePacked("data:application/json;base64,", base64Json));
     }
 
-    // Helper to construct the expected JSON string WITH winner attributes (placeholders)
-    function _expectedWinnerJson() internal pure returns (string memory) {
+    // Helper to construct the expected JSON string WITH winner attributes
+    function _expectedWinnerJson(uint64 fid, uint256 amount) internal pure returns (string memory) {
+        string memory fidStr = LibString.toString(fid);
+        string memory amountStr = LibString.toString(amount);
         return string(
             abi.encodePacked(
                 '{"name": "', EXPECTED_NFT_NAME_METADATA, '",',
                 '"description": "', EXPECTED_NFT_DESCRIPTION, '",',
-                '"image": "', EXPECTED_NFT_IMAGE_URL, '",', // Comma added as attributes will follow
+                '"image": "', EXPECTED_NFT_IMAGE_URL, '",',
                 '"attributes":[{"trait_type":"Winner FID","value":"',
-                "FID_PLACEHOLDER",
+                fidStr,
                 '"},{"trait_type":"Winning Bid (wei)","value":"',
-                "AMOUNT_PLACEHOLDER",
-                '"}]}' // Close attributes array and main JSON object
+                amountStr,
+                '"}]}' 
             )
         );
     }
 
     // Helper to construct the expected full token URI WITH winner attributes (Base64 encoded)
-    function _expectedWinnerTokenURI() internal pure returns (string memory) {
-        string memory json = _expectedWinnerJson();
+    function _expectedWinnerTokenURI(uint64 fid, uint256 amount) internal pure returns (string memory) {
+        string memory json = _expectedWinnerJson(fid, amount);
         string memory base64Json = Base64.encode(bytes(json));
         return string(abi.encodePacked("data:application/json;base64,", base64Json));
     }
 
-    // Helper to get JSON from full URI for debugging
+    // Helper to get JSON from full URI using Solady's Base64.decode
     function _jsonFromUri(string memory uri) internal pure returns (string memory) {
         bytes memory uriBytes = bytes(uri);
-        uint256 prefixLength = 29; // Length of "data:application/json;base64,"
-        if (uriBytes.length <= prefixLength) return "ERROR: URI too short or invalid prefix";
+        uint256 prefixLength = 29; 
+        if (uriBytes.length <= prefixLength) { 
+            bool prefixMatch = true;
+            bytes memory prefixBytes = bytes("data:application/json;base64,");
+            if (uriBytes.length < prefixBytes.length) prefixMatch = false;
+            else {
+                for(uint i = 0; i < prefixBytes.length; i++){
+                    if(uriBytes[i] != prefixBytes[i]){
+                        prefixMatch = false;
+                        break;
+                    }
+                }
+            }
+            if (!prefixMatch) return "ERROR: Invalid URI prefix";
+            return "ERROR: URI too short (only prefix or less)";
+        }
         
-        // Basic check for prefix, can be made more robust if needed for general purpose
-        // For debugging, we assume it mostly follows the pattern if it's long enough
-
         bytes memory base64PartBytes = new bytes(uriBytes.length - prefixLength);
         for(uint i = 0; i < base64PartBytes.length; i++){
             base64PartBytes[i] = uriBytes[i + prefixLength];
         }
         bytes memory decodedJsonBytes = Base64.decode(string(base64PartBytes));
         return string(decodedJsonBytes);
+    }
+
+    function consoleLogByte(bytes1 b) internal pure {
+        string memory hexChars = "0123456789abcdef";
+        bytes memory outStr = new bytes(2);
+        outStr[0] = bytes(hexChars)[uint8(b) >> 4]; // Get the high nibble
+        outStr[1] = bytes(hexChars)[uint8(b) & 0x0F]; // Get the low nibble
+        console.log(string(outStr));
+    }
+
+    // --- Tests for Utility Functions ---
+
+    function testGetBidderStats() public {
+        // 1. Initial state (no bids from user1)
+        (uint256 count, uint64 fid) = nft.getBidderStats(user1);
+        assertEq(count, 0, "Initial bid count for user1 should be 0");
+        assertEq(fid, 0, "Initial FID for user1 should be 0");
+
+        // 2. After user1 places first bid
+        vm.warp(nft.startTime() + 1 hours);
+        vm.prank(user1);
+        nft.placeBid{value: TEST_RESERVE_PRICE}(USER1_FID);
+        (count, fid) = nft.getBidderStats(user1);
+        assertEq(count, 1, "Bid count for user1 after 1st bid should be 1");
+        assertEq(fid, USER1_FID, "FID for user1 after 1st bid incorrect");
+
+        // 3. After user1 places a second bid with a new FID
+        uint64 newFidUser1 = USER1_FID + 7;
+        uint256 secondBidAmountUser1 = nft.highestBid() + nft.minIncrementBps() * nft.highestBid() / 10000 + 1 wei;
+        vm.prank(user1);
+        nft.placeBid{value: secondBidAmountUser1}(newFidUser1);
+        (count, fid) = nft.getBidderStats(user1);
+        assertEq(count, 2, "Bid count for user1 after 2nd bid should be 2");
+        assertEq(fid, newFidUser1, "FID for user1 after 2nd bid incorrect (should update)");
+
+        // 4. For a different user (user2) who hasn't bid
+        (count, fid) = nft.getBidderStats(user2);
+        assertEq(count, 0, "Initial bid count for user2 should be 0");
+        assertEq(fid, 0, "Initial FID for user2 should be 0");
+
+        // 5. After user2 places a bid
+        // Calculate bid amount before pranking
+        uint256 currentHighestForUser2 = nft.highestBid();
+        uint256 currentMinIncrementBpsForUser2 = nft.minIncrementBps();
+        uint256 incrementForUser2 = (currentHighestForUser2 * currentMinIncrementBpsForUser2) / 10000;
+        uint256 user2BidAmount = currentHighestForUser2 + incrementForUser2 + 1 wei;
+
+        vm.prank(user2); // Apply prank just before the call intended for user2
+        nft.placeBid{value: user2BidAmount}(USER2_FID);
+        (count, fid) = nft.getBidderStats(user2);
+        assertEq(count, 1, "Bid count for user2 after 1st bid should be 1");
+        assertEq(fid, USER2_FID, "FID for user2 after 1st bid incorrect");
+    }
+
+    function testGetAuctionInfo() public {
+        address highestBidder_;
+        uint256 highestBid_;
+        uint256 timeLeft_;
+
+        // 1. Before auction starts
+        vm.warp(nft.startTime() - (10 * 60 seconds)); // Warp to 10 mins before auction starts
+        (highestBidder_, highestBid_, timeLeft_) = nft.getAuctionInfo();
+        assertEq(highestBidder_, address(0), "Info: highestBidder before start should be 0");
+        assertEq(highestBid_, 0, "Info: highestBid before start should be 0");
+        assertEq(timeLeft_, 0, "Info: timeLeft before start should be 0");
+
+        // 2. During auction, no bids
+        vm.warp(nft.startTime() + 1 hours);
+        console.log("Debug NoBids: startTime", nft.startTime());
+        console.log("Debug NoBids: endTime", nft.endTime());
+        console.log("Debug NoBids: block.timestamp before calc", block.timestamp);
+        uint256 expectedTimeLeftNoBids = nft.endTime() - block.timestamp;
+        console.log("Debug NoBids: expectedTimeLeftNoBids", expectedTimeLeftNoBids);
+        (highestBidder_, highestBid_, timeLeft_) = nft.getAuctionInfo();
+        assertEq(highestBidder_, address(0), "Info: highestBidder during (no bids) should be 0");
+        assertEq(highestBid_, 0, "Info: highestBid during (no bids) should be 0");
+        assertApproxEqAbs(timeLeft_, expectedTimeLeftNoBids, 2, "Info: timeLeft during (no bids) incorrect");
+
+        // 3. During auction, with bids
+        vm.prank(user1);
+        nft.placeBid{value: TEST_RESERVE_PRICE}(USER1_FID);
+        vm.warp(block.timestamp + 1 hours); // Advance time a bit more
+        console.log("Debug WithBids: startTime", nft.startTime());
+        console.log("Debug WithBids: endTime", nft.endTime());
+        console.log("Debug WithBids: block.timestamp before calc", block.timestamp);
+        uint256 expectedTimeLeftWithBids = nft.endTime() - block.timestamp;
+        console.log("Debug WithBids: expectedTimeLeftWithBids", expectedTimeLeftWithBids);
+        (highestBidder_, highestBid_, timeLeft_) = nft.getAuctionInfo();
+        assertEq(highestBidder_, user1, "Info: highestBidder with bids incorrect");
+        assertEq(highestBid_, TEST_RESERVE_PRICE, "Info: highestBid with bids incorrect");
+        assertApproxEqAbs(timeLeft_, expectedTimeLeftWithBids, 2, "Info: timeLeft with bids incorrect");
+
+        // 4. After auction endTime, before endAuction() called
+        vm.warp(nft.endTime() + 1 seconds);
+        (highestBidder_, highestBid_, timeLeft_) = nft.getAuctionInfo();
+        assertEq(highestBidder_, user1, "Info: highestBidder after endTime (not ended) incorrect");
+        assertEq(highestBid_, TEST_RESERVE_PRICE, "Info: highestBid after endTime (not ended) incorrect");
+        assertEq(timeLeft_, 0, "Info: timeLeft after endTime (not ended) should be 0");
+
+        // 5. After endAuction() called (with a winner from previous step)
+        // Auction is already past endTime, user1 is highestBidder with TEST_RESERVE_PRICE
+        vm.prank(deployer);
+        nft.endAuction(); 
+        (highestBidder_, highestBid_, timeLeft_) = nft.getAuctionInfo();
+        assertEq(highestBidder_, user1, "Info: highestBidder after ended (winner) incorrect");
+        assertEq(highestBid_, TEST_RESERVE_PRICE, "Info: highestBid after ended (winner) incorrect");
+        assertEq(timeLeft_, 0, "Info: timeLeft after ended (winner) should be 0");
+
+        // 6. After endAuction() called (no winner) - need a fresh instance or reset for this
+        // For simplicity, we will test this by creating a new short auction that ends quickly with no bids.
+        JC4PNFT nft2 = new JC4PNFT("ShortAuc", "SA", BENEFICIARY_ADDRESS, 1 ether, 10, 1000, false, 0, 0);
+        vm.warp(nft2.endTime() + 1 seconds);
+        vm.prank(deployer); // deployer of nft2 is still address(this)
+        nft2.endAuction();
+        (highestBidder_, highestBid_, timeLeft_) = nft2.getAuctionInfo();
+        assertEq(highestBidder_, address(0), "Info: highestBidder after ended (no winner) should be 0");
+        assertEq(highestBid_, 0, "Info: highestBid after ended (no winner) should be 0");
+        assertEq(timeLeft_, 0, "Info: timeLeft after ended (no winner) should be 0");
+    }
+
+    // --- Tests for withdraw() ---
+    function test_Withdraw_Reverts_NotBeneficiary() public {
+        vm.warp(nft.startTime() + TEST_AUCTION_DURATION_SECONDS + 1 seconds);
+        vm.prank(deployer);
+        nft.endAuction(); // End the auction (no bids, no payout)
+        assertTrue(nft.auctionEnded(), "Auction should be ended");
+
+        // No need to send funds, should revert before balance check
+        // (bool sent, ) = address(nft).call{value: 0.1 ether}(""); 
+        // require(sent);
+
+        vm.prank(user1); // Not the beneficiary
+        vm.expectRevert("Withdraw: Caller is not beneficiary");
+        nft.withdraw();
+    }
+
+    function test_Withdraw_Reverts_AuctionNotEnded() public {
+        vm.warp(nft.startTime() + 1 hours); // Auction is active
+        assertFalse(nft.auctionEnded(), "Auction should not be ended yet");
+
+        // No need to send funds, should revert before checking if auction ended.
+        // (bool sent, ) = address(nft).call{value: 0.1 ether}(""); 
+        // require(sent);
+
+        vm.prank(BENEFICIARY_ADDRESS);
+        vm.expectRevert("Withdraw: Auction not ended");
+        nft.withdraw();
+    }
+
+    function test_Withdraw_Reverts_NoBalance() public {
+        vm.warp(nft.startTime() + TEST_AUCTION_DURATION_SECONDS + 1 seconds);
+        vm.prank(deployer);
+        nft.endAuction(); // Ends, and if any auction funds, they are paid out. Assumes this is successful.
+        assertTrue(nft.auctionEnded(), "Auction should be ended");
+        
+        // After a successful endAuction (with no bids or successful payout), contract balance should be 0.
+        assertEq(address(nft).balance, 0, "Contract should have no balance after successful endAuction (no bids scenario)");
+
+        vm.prank(BENEFICIARY_ADDRESS);
+        vm.expectRevert("Withdraw: No balance");
+        nft.withdraw();
     }
 } 
