@@ -9,12 +9,12 @@ contract DeployJC4PNFT is Script {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         
         // --- Customizable Auction Parameters ---
-        string memory nftName = "JC4P Collectible Auction";
-        string memory nftSymbol = "JC4PA";
-        address beneficiary = vm.envAddress("BENEFICIARY_ADDRESS"); // Example: Get from env or hardcode
-        // address beneficiary = 0xYourBeneficiaryAddressHere; // Or hardcode directly
+        string memory nftName = "[TEST] JC4P Trading Card";
+        string memory nftSymbol = "TESTJC4P";
+        // address beneficiary = vm.envAddress("BENEFICIARY_ADDRESS"); // Example: Get from env or hardcode
+        address beneficiary = 0x0db12C0A67bc5B8942ea3126a465d7a0b23126C7; // Or hardcode directly
         uint256 reservePrice = 0.1 ether;                 // e.g., 0.1 ETH
-        uint256 auctionDurationSeconds = 7 * 24 * 60 * 60;  // 7 days
+        uint256 auctionDurationSeconds = 3 * 24 * 60 * 60;  // 3 days
         uint256 minIncrementBps = 1000;                   // 1000 BPS = 10%
         bool softCloseEnabled = true;
         uint256 softCloseWindow = 15 * 60;                // 15 minutes
