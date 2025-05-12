@@ -397,7 +397,6 @@ contract JC4PNFTTest is Test {
         vm.warp(nft.endTime() + 1 seconds); 
 
         uint256 beneficiaryInitialBalance = BENEFICIARY_ADDRESS.balance;
-        uint256 deployerInitialBalance = deployer.balance;
 
         vm.expectEmit(true, true, false, true); 
         emit AuctionEnded(user1, winningBid);
@@ -430,9 +429,8 @@ contract JC4PNFTTest is Test {
     function test_EndAuction_Successful_NoBids() public {
         vm.warp(nft.endTime() + 1 seconds); 
         uint256 beneficiaryInitialBalance = BENEFICIARY_ADDRESS.balance;
-        uint256 deployerInitialBalance = deployer.balance;
 
-        console.log("--- NoBids: Deployer Bal Before Prank: ", deployerInitialBalance);
+        console.log("--- NoBids: Deployer Bal Before Prank: ", deployer.balance);
 
         vm.expectEmit(true, true, false, true);
         emit AuctionEnded(address(0), 0);
@@ -448,7 +446,7 @@ contract JC4PNFTTest is Test {
         assertEq(nft.getNFTOwner(), address(0), "NFT should not be minted (getNFTOwner)");
         assertEq(BENEFICIARY_ADDRESS.balance, beneficiaryInitialBalance, "Beneficiary balance should not change");
         
-        console.log("--- NoBids: Deployer Balance Change (Initial - Final): ", deployerInitialBalance - deployerFinalBalance);
+        console.log("--- NoBids: Deployer Balance Change (Initial - Final): ", deployer.balance - deployerFinalBalance);
         assertEq(address(nft).balance, 0, "Contract balance should be 0 (no bids)");
 
         string memory actualURI_NoBids = nft.tokenURI(1);
@@ -722,5 +720,181 @@ contract JC4PNFTTest is Test {
         vm.prank(BENEFICIARY_ADDRESS);
         vm.expectRevert("Withdraw: No balance");
         nft.withdraw();
+    }
+
+    // --- Tests for getAuctionRenderData ---
+    function test_GetAuctionRenderData_InitialState() public view {
+        (
+            uint256 reservePriceOut,
+            uint256 minIncrementBpsOut,
+            uint256 endTimeOut,
+            address highestBidderAddressOut,
+            uint256 highestBidOut,
+            bool hasFirstBidOut,
+            uint64 firstBidderFIDOut,
+            uint256 totalBidsOut,
+            string memory tokenURIDataOut,
+            uint64 fidOfHighestBidderOut
+        ) = nft.getAuctionRenderData(nft.TOKEN_ID());
+
+        assertEq(reservePriceOut, TEST_RESERVE_PRICE, "RenderData: reservePrice incorrect");
+        assertEq(minIncrementBpsOut, TEST_MIN_INCREMENT_BPS, "RenderData: minIncrementBps incorrect");
+        assertEq(endTimeOut, nft.startTime() + TEST_AUCTION_DURATION_SECONDS, "RenderData: endTime incorrect");
+        assertEq(highestBidderAddressOut, address(0), "RenderData: highestBidderAddress incorrect");
+        assertEq(highestBidOut, 0, "RenderData: highestBid incorrect");
+        assertFalse(hasFirstBidOut, "RenderData: hasFirstBid incorrect");
+        assertEq(firstBidderFIDOut, 0, "RenderData: firstBidderFID incorrect");
+        assertEq(totalBidsOut, 0, "RenderData: totalBids incorrect");
+        assertEq(tokenURIDataOut, _expectedUnmintedTokenURI(), "RenderData: tokenURI incorrect");
+        assertEq(fidOfHighestBidderOut, 0, "RenderData: fidOfHighestBidder incorrect");
+    }
+
+    function test_GetAuctionRenderData_AfterFirstBid() public {
+        vm.warp(nft.startTime() + 1 hours);
+        vm.prank(user1);
+        nft.placeBid{value: TEST_RESERVE_PRICE}(USER1_FID);
+
+        (
+            uint256 reservePriceOut,
+            uint256 minIncrementBpsOut,
+            uint256 endTimeOut,
+            address highestBidderAddressOut,
+            uint256 highestBidOut,
+            bool hasFirstBidOut,
+            uint64 firstBidderFIDOut,
+            uint256 totalBidsOut,
+            string memory tokenURIDataOut,
+            uint64 fidOfHighestBidderOut
+        ) = nft.getAuctionRenderData(nft.TOKEN_ID());
+
+        assertEq(reservePriceOut, TEST_RESERVE_PRICE, "RenderData FirstBid: reservePrice");
+        assertEq(minIncrementBpsOut, TEST_MIN_INCREMENT_BPS, "RenderData FirstBid: minIncrementBps");
+        // endTime should be original end time if no soft close triggered
+        assertEq(endTimeOut, nft.startTime() + TEST_AUCTION_DURATION_SECONDS, "RenderData FirstBid: endTime"); 
+        assertEq(highestBidderAddressOut, user1, "RenderData FirstBid: highestBidderAddress");
+        assertEq(highestBidOut, TEST_RESERVE_PRICE, "RenderData FirstBid: highestBid");
+        assertTrue(hasFirstBidOut, "RenderData FirstBid: hasFirstBid");
+        assertEq(firstBidderFIDOut, USER1_FID, "RenderData FirstBid: firstBidderFID");
+        assertEq(totalBidsOut, 1, "RenderData FirstBid: totalBids");
+        assertEq(tokenURIDataOut, _expectedUnmintedTokenURI(), "RenderData FirstBid: tokenURI (still unminted)");
+        assertEq(fidOfHighestBidderOut, USER1_FID, "RenderData FirstBid: fidOfHighestBidder");
+    }
+
+    function test_GetAuctionRenderData_AfterMultipleBids_SoftCloseExtension() public {
+        vm.warp(nft.startTime() + 1 hours);
+        vm.prank(user1);
+        nft.placeBid{value: TEST_RESERVE_PRICE}(USER1_FID);
+
+        // User2 outbids, potentially triggering soft close if timed correctly
+        vm.warp(nft.endTime() - nft.softCloseWindow() + 1 seconds); // Enter soft close window
+        uint256 user2BidAmount = TEST_RESERVE_PRICE + (TEST_RESERVE_PRICE * TEST_MIN_INCREMENT_BPS / 10000) + 0.01 ether;
+        uint256 expectedEndTimeAfterSoftClose = block.timestamp + nft.softCloseExtension();
+
+        vm.prank(user2);
+        nft.placeBid{value: user2BidAmount}(USER2_FID);
+
+        (
+            uint256 reservePriceOut,
+            uint256 minIncrementBpsOut,
+            uint256 endTimeOut,
+            address highestBidderAddressOut,
+            uint256 highestBidOut,
+            bool hasFirstBidOut,
+            uint64 firstBidderFIDOut,
+            uint256 totalBidsOut,
+            string memory tokenURIDataOut,
+            uint64 fidOfHighestBidderOut
+        ) = nft.getAuctionRenderData(nft.TOKEN_ID());
+
+        assertEq(reservePriceOut, TEST_RESERVE_PRICE, "RenderData MultiBid: reservePrice");
+        assertEq(minIncrementBpsOut, TEST_MIN_INCREMENT_BPS, "RenderData MultiBid: minIncrementBps");
+        assertEq(endTimeOut, expectedEndTimeAfterSoftClose, "RenderData MultiBid: endTime (soft close)");
+        assertEq(highestBidderAddressOut, user2, "RenderData MultiBid: highestBidderAddress");
+        assertEq(highestBidOut, user2BidAmount, "RenderData MultiBid: highestBid");
+        assertTrue(hasFirstBidOut, "RenderData MultiBid: hasFirstBid");
+        assertEq(firstBidderFIDOut, USER1_FID, "RenderData MultiBid: firstBidderFID (should be user1)");
+        assertEq(totalBidsOut, 2, "RenderData MultiBid: totalBids");
+        assertEq(tokenURIDataOut, _expectedUnmintedTokenURI(), "RenderData MultiBid: tokenURI (still unminted)");
+        assertEq(fidOfHighestBidderOut, USER2_FID, "RenderData MultiBid: fidOfHighestBidder");
+    }
+
+    function test_GetAuctionRenderData_AuctionEnded_NoWinner() public {
+        vm.warp(nft.endTime() + 1 seconds); // Go past end time
+        vm.prank(deployer);
+        nft.endAuction(); // End it successfully (no bids case)
+
+        (
+            uint256 reservePriceOut,
+            uint256 minIncrementBpsOut,
+            uint256 endTimeOut,
+            address highestBidderAddressOut,
+            uint256 highestBidOut,
+            bool hasFirstBidOut,
+            uint64 firstBidderFIDOut,
+            uint256 totalBidsOut,
+            string memory tokenURIDataOut,
+            uint64 fidOfHighestBidderOut
+        ) = nft.getAuctionRenderData(nft.TOKEN_ID());
+        
+        uint256 originalEndTime = nft.startTime() + TEST_AUCTION_DURATION_SECONDS;
+
+        assertEq(reservePriceOut, TEST_RESERVE_PRICE, "RenderData NoWinner: reservePrice");
+        assertEq(minIncrementBpsOut, TEST_MIN_INCREMENT_BPS, "RenderData NoWinner: minIncrementBps");
+        // endTime in contract is fixed upon deployment (or last extension), check against original if no extensions
+        // If auction ended, the endTime in contract state is the time it was supposed to end (or did end)
+        assertEq(endTimeOut, originalEndTime, "RenderData NoWinner: endTime"); 
+        assertEq(highestBidderAddressOut, address(0), "RenderData NoWinner: highestBidderAddress");
+        assertEq(highestBidOut, 0, "RenderData NoWinner: highestBid");
+        assertFalse(hasFirstBidOut, "RenderData NoWinner: hasFirstBid");
+        assertEq(firstBidderFIDOut, 0, "RenderData NoWinner: firstBidderFID");
+        assertEq(totalBidsOut, 0, "RenderData NoWinner: totalBids");
+        assertEq(tokenURIDataOut, _expectedUnmintedTokenURI(), "RenderData NoWinner: tokenURI");
+        assertEq(fidOfHighestBidderOut, 0, "RenderData NoWinner: fidOfHighestBidder");
+    }
+
+    function test_GetAuctionRenderData_AuctionEnded_WithWinner() public {
+        vm.warp(nft.startTime() + 1 hours);
+        uint256 winningBid = TEST_RESERVE_PRICE + 0.1 ether;
+        vm.prank(user1);
+        nft.placeBid{value: winningBid}(USER1_FID);
+
+        vm.warp(nft.endTime() + 1 seconds); 
+        vm.prank(deployer);
+        nft.endAuction();
+
+        (
+            uint256 reservePriceOut,
+            uint256 minIncrementBpsOut,
+            uint256 endTimeOut_,
+            address highestBidderAddressOut,
+            uint256 highestBidOut,
+            bool hasFirstBidOut,
+            uint64 firstBidderFIDOut,
+            uint256 totalBidsOut,
+            string memory tokenURIDataOut,
+            uint64 fidOfHighestBidderOut
+        ) = nft.getAuctionRenderData(nft.TOKEN_ID());
+        
+        uint256 finalEndTime = nft.startTime() + TEST_AUCTION_DURATION_SECONDS; // Original end time if no soft close happened
+
+        assertEq(reservePriceOut, TEST_RESERVE_PRICE, "RenderData Winner: reservePrice");
+        assertEq(minIncrementBpsOut, TEST_MIN_INCREMENT_BPS, "RenderData Winner: minIncrementBps");
+        assertEq(endTimeOut_, finalEndTime, "RenderData Winner: endTime");
+        assertEq(highestBidderAddressOut, user1, "RenderData Winner: highestBidderAddress");
+        assertEq(highestBidOut, winningBid, "RenderData Winner: highestBid");
+        assertTrue(hasFirstBidOut, "RenderData Winner: hasFirstBid");
+        assertEq(firstBidderFIDOut, USER1_FID, "RenderData Winner: firstBidderFID");
+        assertEq(totalBidsOut, 1, "RenderData Winner: totalBids");
+        assertEq(tokenURIDataOut, _expectedWinnerTokenURI(USER1_FID, winningBid), "RenderData Winner: tokenURI");
+        assertEq(fidOfHighestBidderOut, USER1_FID, "RenderData Winner: fidOfHighestBidder");
+    }
+
+    function test_GetAuctionRenderData_InvalidTokenId() public {
+        uint256 currentTokenId = nft.TOKEN_ID();
+        vm.expectRevert(bytes("JC4PNFT: Only TOKEN_ID 1 exists"));
+        nft.getAuctionRenderData(currentTokenId + 1); // Try with TOKEN_ID + 1
+
+        vm.expectRevert(bytes("JC4PNFT: Only TOKEN_ID 1 exists"));
+        nft.getAuctionRenderData(0); // Try with 0
     }
 } 

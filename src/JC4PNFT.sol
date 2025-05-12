@@ -265,4 +265,35 @@ contract JC4PNFT is ERC721 {
 
         emit FundsWithdrawn(beneficiary, balance);
     }
+
+    // --- New Function for Front-end Rendering ---
+    function getAuctionRenderData(uint256 _tokenId)
+        public
+        view
+        returns (
+            uint256 reservePriceOut,
+            uint256 minIncrementBpsOut,
+            uint256 endTimeOut,
+            address highestBidderAddressOut,
+            uint256 highestBidOut,
+            bool hasFirstBidOut,
+            uint64 firstBidderFIDOut,
+            uint256 totalBidsOut,
+            string memory tokenURIDataOut,
+            uint64 fidOfHighestBidderOut
+        )
+    {
+        require(_tokenId == TOKEN_ID, "JC4PNFT: Only TOKEN_ID 1 exists");
+
+        reservePriceOut = reservePrice;
+        minIncrementBpsOut = minIncrementBps;
+        endTimeOut = endTime; // This is the current end time, which might have been extended
+        highestBidderAddressOut = highestBidder;
+        highestBidOut = highestBid;
+        hasFirstBidOut = hasFirstBid;
+        firstBidderFIDOut = firstBidderFID;
+        totalBidsOut = totalBids;
+        tokenURIDataOut = tokenURI(TOKEN_ID); // Internal call to existing tokenURI
+        fidOfHighestBidderOut = highestBidderFID;
+    }
 } 
